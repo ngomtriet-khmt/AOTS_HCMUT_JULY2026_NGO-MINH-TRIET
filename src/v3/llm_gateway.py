@@ -24,7 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 # --- Cấu hình model & ngân sách token ---
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODEL = "gemini-2.0-flash"
+
+# Danh sách fallback: nếu model chính bị 503/overloaded, tự động thử model tiếp theo.
+FALLBACK_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
 
 # Trần token đầu vào cho 1 lần gọi (chừa chỗ cho output & overhead trong ~1M context).
 SINGLE_CALL_TOKEN_BUDGET = 800_000
@@ -43,29 +50,62 @@ def generate(
     temperature: float = 0.3,
     max_tokens: int = 4000,
     model: str = DEFAULT_MODEL,
-    retry_count: int = 2,
+    retry_count: int = 3,
     validate: bool = True,
 ) -> str:
-    """Gọi Gemini với retry + (tuỳ chọn) output validation."""
+    """Gọi Gemini với retry + fallback model + (tuỳ chọn) output validation."""
     if not api_key:
         return "❌ Lỗi: Chưa cung cấp Google AI API Key. Vui lòng nhập ở sidebar."
 
-    for attempt in range(retry_count + 1):
-        try:
-            response = _call_gemini(system, user, api_key, temperature, max_tokens, model)
-            if validate:
-                warnings = validate_output(response)["warnings"]
-                if warnings:
-                    prefix = "\n".join(f"⚠️ {w}" for w in warnings)
-                    response = f"{prefix}\n\n---\n\n{response}"
-            return response
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} failed: {e}")
-            if attempt < retry_count:
-                time.sleep(2 ** attempt)
-            else:
-                return f"❌ Lỗi sau {retry_count + 1} lần thử: {str(e)}"
-    return "❌ Lỗi không xác định"
+    # Xây danh sách models: model được chọn trước, rồi fallback (bỏ trùng).
+    models_to_try = [model] + [m for m in FALLBACK_MODELS if m != model]
+    last_error = ""
+
+    for current_model in models_to_try:
+        for attempt in range(retry_count + 1):
+            try:
+                response = _call_gemini(
+                    system, user, api_key, temperature, max_tokens, current_model
+                )
+                if validate:
+                    warnings = validate_output(response)["warnings"]
+                    if warnings:
+                        prefix = "\n".join(f"⚠️ {w}" for w in warnings)
+                        response = f"{prefix}\n\n---\n\n{response}"
+                # Ghi nhận model thực tế đã dùng (để hiển thị trên UI).
+                generate.last_model_used = current_model
+                return response
+            except Exception as e:
+                last_error = str(e)
+                is_overloaded = any(
+                    code in last_error for code in ["503", "429", "UNAVAILABLE", "overloaded"]
+                )
+                logger.warning(
+                    f"[{current_model}] Attempt {attempt + 1}/{retry_count + 1} failed: {e}"
+                )
+                if is_overloaded and attempt < retry_count:
+                    wait = min(2 ** (attempt + 1), 16)
+                    logger.info(f"  → Retry sau {wait}s...")
+                    time.sleep(wait)
+                elif is_overloaded:
+                    # Hết retry cho model này → thử fallback model tiếp theo.
+                    logger.info(f"  → Model {current_model} quá tải, chuyển sang fallback...")
+                    break
+                else:
+                    # Lỗi khác (auth, invalid request...) → không cần thử model khác.
+                    generate.last_model_used = current_model
+                    return f"❌ Lỗi: {last_error}"
+
+    generate.last_model_used = models_to_try[-1]
+    return (
+        f"❌ Tất cả models đều không khả dụng sau nhiều lần thử.\n\n"
+        f"Models đã thử: {', '.join(models_to_try)}\n\n"
+        f"Lỗi cuối: {last_error}\n\n"
+        f"💡 Gợi ý: Đợi vài phút rồi thử lại, hoặc kiểm tra API key."
+    )
+
+# Thuộc tính lưu model thực tế đã dùng lần gần nhất.
+generate.last_model_used = DEFAULT_MODEL
 
 
 def _call_gemini(

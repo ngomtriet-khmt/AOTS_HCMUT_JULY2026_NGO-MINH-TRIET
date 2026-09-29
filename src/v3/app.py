@@ -102,7 +102,14 @@ def main():
 
         st.divider()
         st.header("⚙️ Cấu hình")
-        st.text_input("Model", value=gw.DEFAULT_MODEL, disabled=True)
+        model_options = list(dict.fromkeys([gw.DEFAULT_MODEL] + gw.FALLBACK_MODELS))
+        selected_model = st.selectbox(
+            "Model chính",
+            model_options,
+            help="Nếu model này bị quá tải (503), sẽ tự động fallback sang model khác.",
+        )
+        st.session_state["selected_model"] = selected_model
+        st.caption(f"Fallback: {' → '.join(m for m in model_options if m != selected_model)}")
         st.session_state.sanitize_pii = st.checkbox(
             "🔒 Che PII trước khi gửi (email, SĐT, MSSV, API key)",
             value=st.session_state.sanitize_pii,
@@ -171,12 +178,14 @@ def _tab_summary(tab):
                 meta_summary=st.session_state.meta_summary,
                 sanitize=st.session_state.sanitize_pii,
                 progress_cb=cb,
+                model=st.session_state.get("selected_model", gw.DEFAULT_MODEL),
             )
             elapsed = time.time() - start
             progress.empty()
 
             st.markdown(response)
-            st.caption(f"⏱️ {elapsed:.1f}s · Chế độ: {mode} · Model: {gw.DEFAULT_MODEL}")
+            used = gw.generate.last_model_used
+            st.caption(f"⏱️ {elapsed:.1f}s · Chế độ: {mode} · Model: {used}")
             _log({"function": "summary", "level": level, "mode": mode,
                   "latency_s": round(elapsed, 2)})
 
@@ -218,11 +227,12 @@ def _tab_questions(tab):
                     adequacy,
                     st.session_state.api_key,
                     sanitize=st.session_state.sanitize_pii,
+                    model=st.session_state.get("selected_model", gw.DEFAULT_MODEL),
                 )
                 elapsed = time.time() - start
             st.session_state.last_questions = response
             st.markdown(response)
-            st.caption(f"⏱️ {elapsed:.1f}s")
+            st.caption(f"⏱️ {elapsed:.1f}s · Model: {gw.generate.last_model_used}")
             _log({"function": "question_gen", "num_questions": num_questions,
                   "difficulty": difficulty, "latency_s": round(elapsed, 2)})
 
@@ -267,10 +277,11 @@ def _tab_explain(tab):
                     mode,
                     st.session_state.api_key,
                     sanitize=st.session_state.sanitize_pii,
+                    model=st.session_state.get("selected_model", gw.DEFAULT_MODEL),
                 )
                 elapsed = time.time() - start
             st.markdown(response)
-            st.caption(f"⏱️ {elapsed:.1f}s")
+            st.caption(f"⏱️ {elapsed:.1f}s · Model: {gw.generate.last_model_used}")
             _log({"function": "explain", "concept": concept, "mode": mode,
                   "latency_s": round(elapsed, 2)})
 
@@ -293,10 +304,11 @@ def _tab_evaluate(tab):
                     student_answer,
                     st.session_state.api_key,
                     sanitize=st.session_state.sanitize_pii,
+                    model=st.session_state.get("selected_model", gw.DEFAULT_MODEL),
                 )
                 elapsed = time.time() - start
             st.markdown(response)
-            st.caption(f"⏱️ {elapsed:.1f}s")
+            st.caption(f"⏱️ {elapsed:.1f}s · Model: {gw.generate.last_model_used}")
             _log({"function": "evaluate", "latency_s": round(elapsed, 2)})
 
 
