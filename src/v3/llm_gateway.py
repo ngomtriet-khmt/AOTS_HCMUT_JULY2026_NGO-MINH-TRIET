@@ -13,6 +13,7 @@ Tác giả: Ngô Minh Triết — AOTS HCMUT
 
 import time
 import re
+import random
 import logging
 from typing import Dict, List, Callable, Optional, Tuple
 
@@ -24,20 +25,38 @@ logger = logging.getLogger(__name__)
 
 
 # --- Cấu hình model & ngân sách token ---
-DEFAULT_MODEL = "gemini-2.0-flash"
-
-# Danh sách fallback: nếu model chính bị 503/overloaded, tự động thử model tiếp theo.
-FALLBACK_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-]
+DEFAULT_MODEL = "gemini-3.8-flash"
 
 # Trần token đầu vào cho 1 lần gọi (chừa chỗ cho output & overhead trong ~1M context).
 SINGLE_CALL_TOKEN_BUDGET = 800_000
 
 # Kích thước tối đa mỗi segment ở giai đoạn MAP (theo ký tự, ~40k token/segment).
 MAP_SEGMENT_CHARS = 120_000
+
+
+# ---------------------------------------------------------------------------
+# Tự động lấy danh sách models khả dụng từ Google AI API
+# ---------------------------------------------------------------------------
+def list_available_models(api_key: str) -> List[str]:
+    """Gọi API để lấy danh sách model khả dụng, ưu tiên flash > pro."""
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        models = []
+        for m in client.models.list():
+            name = m.name.replace("models/", "") if hasattr(m, "name") else str(m)
+            # Chỉ lấy model hỗ trợ generateContent
+            if hasattr(m, "supported_generation_methods"):
+                if "generateContent" not in m.supported_generation_methods:
+                    continue
+            models.append(name)
+        # Sắp xếp: flash trước (rẻ/nhanh), rồi pro
+        flash = sorted([m for m in models if "flash" in m], reverse=True)
+        pro = sorted([m for m in models if "pro" in m and "flash" not in m], reverse=True)
+        return flash + pro
+    except Exception as e:
+        logger.warning(f"Không thể lấy danh sách models: {e}")
+        return [DEFAULT_MODEL]
 
 
 # ---------------------------------------------------------------------------
@@ -50,58 +69,109 @@ def generate(
     temperature: float = 0.3,
     max_tokens: int = 4000,
     model: str = DEFAULT_MODEL,
-    retry_count: int = 3,
+    retry_count: int = 6,
     validate: bool = True,
+    progress_text_cb: Optional[Callable[[str], None]] = None,
 ) -> str:
-    """Gọi Gemini với retry + fallback model + (tuỳ chọn) output validation."""
+    """
+    Gọi Gemini với retry kiên nhẫn + auto-fallback model.
+
+    Chiến lược khi bị 503/429 (overloaded):
+    - Retry tối đa 7 lần với exponential backoff + jitter (4s → 8s → 16s → 32s → 60s → 60s → 60s)
+    - Nếu vẫn fail → tự động thử model khác (lấy từ API)
+    - Tổng thời gian chờ tối đa ~4 phút trước khi bỏ cuộc
+    """
     if not api_key:
         return "❌ Lỗi: Chưa cung cấp Google AI API Key. Vui lòng nhập ở sidebar."
 
-    # Xây danh sách models: model được chọn trước, rồi fallback (bỏ trùng).
-    models_to_try = [model] + [m for m in FALLBACK_MODELS if m != model]
     last_error = ""
+    total_wait = 0
 
-    for current_model in models_to_try:
-        for attempt in range(retry_count + 1):
+    # --- Giai đoạn 1: Retry kiên nhẫn với model được chọn ---
+    for attempt in range(retry_count + 1):
+        try:
+            response = _call_gemini(system, user, api_key, temperature, max_tokens, model)
+            if validate:
+                warnings = validate_output(response)["warnings"]
+                if warnings:
+                    prefix = "\n".join(f"⚠️ {w}" for w in warnings)
+                    response = f"{prefix}\n\n---\n\n{response}"
+            generate.last_model_used = model
+            return response
+        except Exception as e:
+            last_error = str(e)
+            is_overloaded = any(
+                code in last_error for code in ["503", "429", "UNAVAILABLE", "overloaded"]
+            )
+            is_not_found = "404" in last_error or "NOT_FOUND" in last_error
+
+            if is_not_found:
+                # Model không tồn tại → bỏ qua, chuyển sang fallback ngay
+                logger.warning(f"[{model}] Model không tồn tại, chuyển sang fallback...")
+                break
+
+            if not is_overloaded:
+                # Lỗi khác (auth, safety...) → dừng ngay
+                generate.last_model_used = model
+                return f"❌ Lỗi: {last_error}"
+
+            if attempt < retry_count:
+                base_wait = min(4 * (2 ** attempt), 60)
+                jitter = random.uniform(0, base_wait * 0.3)
+                wait = base_wait + jitter
+                total_wait += wait
+                logger.info(
+                    f"[{model}] Lần {attempt + 1}/{retry_count + 1} thất bại (503). "
+                    f"Đợi {wait:.0f}s... (tổng đã chờ: {total_wait:.0f}s)"
+                )
+                if progress_text_cb:
+                    progress_text_cb(
+                        f"⏳ Server quá tải, đợi {wait:.0f}s rồi thử lại "
+                        f"(lần {attempt + 2}/{retry_count + 1})..."
+                    )
+                time.sleep(wait)
+            else:
+                logger.info(f"[{model}] Hết retry, chuyển sang fallback...")
+
+    # --- Giai đoạn 2: Thử fallback models từ API ---
+    logger.info("Đang tìm model fallback từ Google AI API...")
+    fallback_models = list_available_models(api_key)
+    # Bỏ model đã thử
+    fallback_models = [m for m in fallback_models if m != model]
+
+    for fb_model in fallback_models[:3]:  # Thử tối đa 3 fallback
+        logger.info(f"Thử fallback model: {fb_model}")
+        if progress_text_cb:
+            progress_text_cb(f"🔄 Thử model fallback: {fb_model}...")
+        for attempt in range(2):  # 2 lần retry cho mỗi fallback
             try:
                 response = _call_gemini(
-                    system, user, api_key, temperature, max_tokens, current_model
+                    system, user, api_key, temperature, max_tokens, fb_model
                 )
                 if validate:
                     warnings = validate_output(response)["warnings"]
                     if warnings:
                         prefix = "\n".join(f"⚠️ {w}" for w in warnings)
                         response = f"{prefix}\n\n---\n\n{response}"
-                # Ghi nhận model thực tế đã dùng (để hiển thị trên UI).
-                generate.last_model_used = current_model
+                generate.last_model_used = fb_model
                 return response
             except Exception as e:
-                last_error = str(e)
-                is_overloaded = any(
-                    code in last_error for code in ["503", "429", "UNAVAILABLE", "overloaded"]
-                )
-                logger.warning(
-                    f"[{current_model}] Attempt {attempt + 1}/{retry_count + 1} failed: {e}"
-                )
-                if is_overloaded and attempt < retry_count:
-                    wait = min(2 ** (attempt + 1), 16)
-                    logger.info(f"  → Retry sau {wait}s...")
+                err = str(e)
+                if "404" in err or "NOT_FOUND" in err:
+                    break  # Model không tồn tại, thử cái khác
+                if attempt < 1:
+                    wait = random.uniform(5, 15)
                     time.sleep(wait)
-                elif is_overloaded:
-                    # Hết retry cho model này → thử fallback model tiếp theo.
-                    logger.info(f"  → Model {current_model} quá tải, chuyển sang fallback...")
-                    break
-                else:
-                    # Lỗi khác (auth, invalid request...) → không cần thử model khác.
-                    generate.last_model_used = current_model
-                    return f"❌ Lỗi: {last_error}"
+                last_error = err
 
-    generate.last_model_used = models_to_try[-1]
+    generate.last_model_used = model
     return (
-        f"❌ Tất cả models đều không khả dụng sau nhiều lần thử.\n\n"
-        f"Models đã thử: {', '.join(models_to_try)}\n\n"
-        f"Lỗi cuối: {last_error}\n\n"
-        f"💡 Gợi ý: Đợi vài phút rồi thử lại, hoặc kiểm tra API key."
+        f"❌ Server quá tải liên tục (đã chờ ~{total_wait:.0f}s).\n\n"
+        f"Lỗi: {last_error}\n\n"
+        f"💡 **Gợi ý:**\n"
+        f"- Đợi 2-5 phút rồi bấm lại\n"
+        f"- Thử vào lúc ít người dùng (sáng sớm, khuya)\n"
+        f"- Nếu dùng API key miễn phí: nâng cấp lên paid tier để có rate limit cao hơn"
     )
 
 # Thuộc tính lưu model thực tế đã dùng lần gần nhất.

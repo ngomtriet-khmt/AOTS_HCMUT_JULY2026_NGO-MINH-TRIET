@@ -102,16 +102,24 @@ def main():
 
         st.divider()
         st.header("⚙️ Cấu hình")
-        model_options = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+        # Auto-detect models từ API nếu có key
+        if api_key and "available_models" not in st.session_state:
+            with st.spinner("Đang lấy danh sách models..."):
+                st.session_state["available_models"] = gw.list_available_models(api_key)
+        model_options = st.session_state.get("available_models", [gw.DEFAULT_MODEL])
+        if not model_options:
+            model_options = [gw.DEFAULT_MODEL]
         selected_model = st.selectbox(
             "Model chính",
             model_options,
-            help="Nếu model này bị quá tải (503), sẽ tự động fallback sang model khác.",
+            help="Nếu model này bị quá tải (503), sẽ tự động retry + fallback sang model khác.",
         )
         st.session_state["selected_model"] = selected_model
-        fallback_list = [m for m in model_options if m != selected_model]
-        if fallback_list:
-            st.caption(f"Fallback: {' → '.join(fallback_list)}")
+        st.caption("🔄 Auto-retry lên tới 7 lần + fallback khi server quá tải")
+        if st.button("🔃 Refresh danh sách models", key="btn_refresh_models"):
+            if api_key:
+                st.session_state["available_models"] = gw.list_available_models(api_key)
+                st.rerun()
         st.session_state.sanitize_pii = st.checkbox(
             "🔒 Che PII trước khi gửi (email, SĐT, MSSV, API key)",
             value=st.session_state.sanitize_pii,
