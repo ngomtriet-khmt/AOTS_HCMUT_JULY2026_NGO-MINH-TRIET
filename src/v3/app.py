@@ -102,14 +102,16 @@ def main():
 
         st.divider()
         st.header("⚙️ Cấu hình")
-        model_options = list(dict.fromkeys([gw.DEFAULT_MODEL] + gw.FALLBACK_MODELS))
+        model_options = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
         selected_model = st.selectbox(
             "Model chính",
             model_options,
             help="Nếu model này bị quá tải (503), sẽ tự động fallback sang model khác.",
         )
         st.session_state["selected_model"] = selected_model
-        st.caption(f"Fallback: {' → '.join(m for m in model_options if m != selected_model)}")
+        fallback_list = [m for m in model_options if m != selected_model]
+        if fallback_list:
+            st.caption(f"Fallback: {' → '.join(fallback_list)}")
         st.session_state.sanitize_pii = st.checkbox(
             "🔒 Che PII trước khi gửi (email, SĐT, MSSV, API key)",
             value=st.session_state.sanitize_pii,
