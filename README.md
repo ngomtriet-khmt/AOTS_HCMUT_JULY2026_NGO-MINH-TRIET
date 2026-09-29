@@ -33,7 +33,7 @@ git clone <link-repo>.git
 cd END_OF_COURSE_PROJECT
 
 # 2. Cài đặt thư viện
-cd src/v2
+cd src/v3
 pip install -r requirements.txt
 
 # 3. Khởi chạy ứng dụng
@@ -62,13 +62,23 @@ Xem hướng dẫn chi tiết từng bước tại [HUONG_DAN_SU_DUNG.md](./HUON
 | **Đánh Giá Câu Trả Lời** | Chấm điểm, chỉ ra lỗi sai, gợi ý cải thiện |
 | **Xuất Anki Flashcards** | Xuất câu hỏi sang file TSV để import vào Anki |
 
-## AI Provider hỗ trợ
+## AI Provider
 
-| Provider | Model | Chi phí | Chất lượng |
-|----------|-------|---------|------------|
-| **Google Gemini** (mặc định) | Gemini 2.0 Flash | Miễn phí | Rất tốt |
-| Anthropic Claude | Claude Sonnet 4.6 | Trả phí | Xuất sắc |
-| OpenAI GPT | GPT-4o-mini | Trả phí | Tốt |
+Từ **V3**, dự án chạy **hoàn toàn bằng Google Gemini** — chỉ cần một Google AI API key miễn phí.
+
+| Provider | Model | Chi phí | Context |
+|----------|-------|---------|---------|
+| **Google Gemini** | `gemini-3.8-flash` | Miễn phí | ~1M token |
+
+> V1/V2 vẫn giữ hỗ trợ đa provider (Claude/OpenAI) để đối chiếu lịch sử. V3 tối giản về Gemini-only.
+
+### V3 có gì mới
+
+- **Gemini-only**: gọn nhẹ, chỉ cần Google AI key.
+- **Hỗ trợ file lớn**: bỏ giới hạn 50 trang/100KB; thêm định dạng **DOCX**.
+- **Hybrid xử lý**: tài liệu vừa context ~1M token → gửi **single-call**; quá lớn → tự động **map-reduce** (tóm tắt từng phần rồi tổng hợp).
+- **Che PII** trước khi gửi model (email, SĐT, MSSV, API key) — học từ [TaskLens](https://github.com/truonghienminh-HCMUT/tasklens).
+- **Trích dẫn** `[Trang X]` (PDF) / `[Phần X]` (DOCX/TXT) + cảnh báo khi output thiếu nguồn.
 
 ---
 
@@ -92,12 +102,13 @@ END_OF_COURSE_PROJECT/
 │   ├── 11_video_demo_script.md
 │   └── 12_case_study_portfolio.md
 └── src/
-    ├── v1/                      # Prototype V1 (phiên bản gốc)
-    └── v2/                      # Prototype V2 (cải tiến)
+    ├── v1/                      # Prototype V1 (phiên bản gốc, đa provider)
+    ├── v2/                      # Prototype V2 (grounding/adequacy/conflict)
+    └── v3/                      # Prototype V3 (Gemini-only + file lớn) ← khuyến nghị
         ├── app.py               # Ứng dụng chính
-        ├── document_processor.py
-        ├── prompt_engine.py
-        ├── llm_gateway.py
+        ├── document_processor.py # PDF/DOCX/TXT, chunk, map-reduce split, che PII
+        ├── prompt_engine.py      # Prompt single-call + map/reduce
+        ├── llm_gateway.py        # Gemini client + orchestration hybrid
         └── requirements.txt
 ```
 
@@ -122,8 +133,8 @@ END_OF_COURSE_PROJECT/
 
 ## Giới hạn & Lưu ý an toàn
 
-- Chỉ hỗ trợ file PDF có text (không đọc được PDF scan/hình ảnh)
-- Tối đa 50 trang PDF / 100KB text
+- Chỉ hỗ trợ file có text layer (không đọc được PDF scan/ảnh)
+- V3: hỗ trợ file lớn (không giới hạn số trang, trần an toàn ~15M ký tự); file cực lớn xử lý bằng map-reduce nên tốn nhiều lần gọi API hơn
 - AI có thể tạo thông tin không chính xác (~5% hallucination rate)
 - **Luôn đối chiếu kết quả AI với tài liệu gốc trước khi tin**
 - Không upload thông tin cá nhân hoặc đề thi chưa công bố
